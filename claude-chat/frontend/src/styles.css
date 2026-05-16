@@ -353,6 +353,88 @@ body {
   justify-content: flex-end;
 }
 
+.sidebar-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.auth-banner {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.auth-user {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.login-modal code {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.login-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.login-url-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.login-url {
+  display: block;
+  font-size: 11px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  color: #93c5fd;
+  word-break: break-all;
+  line-height: 1.4;
+  max-height: 4.2em;
+  overflow: hidden;
+}
+
+.login-url-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.login-code-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 14px;
+  width: 100%;
+}
+
+.login-code-input:focus {
+  outline: 1px solid var(--accent);
+}
+
+.login-error {
+  margin: 0;
+  font-size: 13px;
+  color: #f87171;
+}
+
 .empty {
   flex: 1;
   display: flex;

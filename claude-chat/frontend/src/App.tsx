@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   createSession,
   deleteSession,
+  fetchAuthStatus,
   fetchPendingIntercept,
   listMessages,
   listSessions,
@@ -9,8 +10,9 @@ import {
   openSocket,
   resolveIntercept,
 } from "./api";
+import { ClaudeLoginModal } from "./ClaudeLoginModal";
 import { MarkdownMessage } from "./MarkdownMessage";
-import type { Intercept, Message, Session, Subagent } from "./types";
+import type { AuthStatus, Intercept, Message, Session, Subagent } from "./types";
 
 type WsState = "closed" | "connecting" | "open";
 
@@ -88,6 +90,8 @@ export function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [wsState, setWsState] = useState<WsState>("closed");
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // Buffered streaming: deltas land in the ref, a rAF callback flushes them
@@ -118,6 +122,9 @@ export function App() {
 
   useEffect(() => {
     void refresh();
+    void fetchAuthStatus()
+      .then(setAuth)
+      .catch(() => setAuth({ logged_in: false, email: null, org_name: null, auth_method: null, subscription_type: null }));
   }, []);
 
   // Poll for pending intercepts while a turn is in progress.
@@ -194,6 +201,11 @@ export function App() {
 
       // Protocol events from our backend.
       if (ev.type === "user_message_saved" || ev.type === "ready") return;
+      if (ev.type === "auth_required") {
+        setLoginOpen(true);
+        setBusy(false);
+        return;
+      }
       if (ev.type === "subagent_started" || ev.type === "subagent_completed") {
         const sub = (ev as { subagent?: Subagent }).subagent;
         if (sub) {
@@ -355,6 +367,11 @@ export function App() {
     const ws = wsRef.current;
     const text = input.trim();
     if (!text || busy || wsState !== "open" || !ws) return;
+    if (text === "/login" || text.startsWith("/login ")) {
+      setLoginOpen(true);
+      setInput("");
+      return;
+    }
     ws.send(JSON.stringify({ prompt: text }));
     // Optimistic append: show the user's message immediately. It will be replaced
     // by the canonical row from the DB when turn_complete triggers loadMessages.
@@ -401,8 +418,26 @@ export function App() {
       <aside className="sidebar">
         <header>
           <h1>Sessions</h1>
-          <button className="btn" onClick={onNewSession}>+ New</button>
+          <div className="sidebar-actions">
+            <button className="btn" onClick={onNewSession}>+ New</button>
+            {auth && !auth.logged_in && (
+              <button className="btn ghost" onClick={() => setLoginOpen(true)}>
+                Sign in
+              </button>
+            )}
+          </div>
         </header>
+        {auth && !auth.logged_in && (
+          <div className="auth-banner">
+            <span>Not signed in to Claude CLI</span>
+            <button className="btn" type="button" onClick={() => setLoginOpen(true)}>
+              Sign in
+            </button>
+          </div>
+        )}
+        {auth?.logged_in && auth.email && (
+          <div className="auth-user">{auth.email}</div>
+        )}
         <div className="session-list">
           {sessions.length === 0 && (
             <div style={{ padding: 16, color: "var(--muted)", fontSize: 13 }}>
@@ -539,7 +574,7 @@ export function App() {
                     ? "connecting…"
                     : wsState === "closed"
                     ? "disconnected — reopen the session"
-                    : "Message claude…"
+                    : "Message claude… (/login to sign in)"
                 }
                 disabled={!onParentTab || wsState !== "open"}
                 onKeyDown={(e) => {
@@ -556,6 +591,18 @@ export function App() {
           </>
         )}
       </main>
+      <ClaudeLoginModal
+        open={loginOpen}
+        onClose={() => setLoginOpen(false)}
+        onLoggedIn={(status) => {
+          setAuth(status);
+          if (activeId) {
+            const id = activeId;
+            setActiveId(null);
+            requestAnimationFrame(() => setActiveId(id));
+          }
+        }}
+      />
       {intercept && (
         <div className="intercept-overlay">
           <div className="intercept-modal">

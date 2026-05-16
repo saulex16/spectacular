@@ -18,10 +18,19 @@ from datetime import datetime, timezone
 _pending: dict[str, dict] = {}          # intercept_id → intercept record
 _intercept_events: dict[str, asyncio.Event] = {}  # intercept_id → resolved event
 
+from claude_chat.auth_manager import get_auth_manager
 from claude_chat.db import SessionLocal, get_session
 from claude_chat.models import Message, Session, Subagent
-from claude_chat.process_manager import get_manager
-from claude_chat.schemas import MessageRead, SessionCreate, SessionRead, SubagentRead
+from claude_chat.process_manager import ClaudeNotFoundError, get_manager
+from claude_chat.schemas import (
+    AuthStatusRead,
+    LoginCodeSubmit,
+    LoginSessionRead,
+    MessageRead,
+    SessionCreate,
+    SessionRead,
+    SubagentRead,
+)
 
 router = APIRouter()
 
@@ -219,6 +228,57 @@ async def list_processes() -> list[dict]:
     return get_manager().status()
 
 
+@router.get("/auth/status", response_model=AuthStatusRead)
+async def auth_status() -> AuthStatusRead:
+    try:
+        data = await get_auth_manager().get_status()
+    except ClaudeNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+    return AuthStatusRead(**data)
+
+
+@router.post("/auth/login/start", response_model=LoginSessionRead)
+async def auth_login_start() -> LoginSessionRead:
+    try:
+        data = await get_auth_manager().start_login()
+    except ClaudeNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+    return LoginSessionRead(**data)
+
+
+@router.get("/auth/login/{login_id}", response_model=LoginSessionRead)
+async def auth_login_poll(login_id: str) -> LoginSessionRead:
+    data = await get_auth_manager().get_login(login_id)
+    if data is None:
+        raise HTTPException(404, "login session not found")
+    return LoginSessionRead(**data)
+
+
+@router.post("/auth/login/{login_id}/code", response_model=LoginSessionRead)
+async def auth_login_code(login_id: str, payload: LoginCodeSubmit) -> LoginSessionRead:
+    try:
+        data = await get_auth_manager().submit_code(login_id, payload.code)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return LoginSessionRead(**data)
+
+
+@router.delete("/auth/login/{login_id}", status_code=204)
+async def auth_login_cancel(login_id: str) -> None:
+    await get_auth_manager().cancel_login(login_id)
+
+
+@router.post("/auth/logout", response_model=AuthStatusRead)
+async def auth_logout() -> AuthStatusRead:
+    try:
+        data = await get_auth_manager().logout()
+    except ClaudeNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+    return AuthStatusRead(**data)
+
+
 async def _safe_send(websocket: WebSocket, payload: dict) -> bool:
     """Send a JSON event, return False if the socket is no longer writable."""
     try:
@@ -318,6 +378,17 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             await websocket.close()
             return
         cwd = session.cwd or None
+
+    auth = await get_auth_manager().get_status()
+    if not auth.get("logged_in"):
+        await websocket.send_json(
+            {
+                "type": "auth_required",
+                "message": "not logged in — use /login or the Sign in button",
+            }
+        )
+        await websocket.close()
+        return
 
     manager = get_manager()
     is_resume = await _has_user_messages(session_id)

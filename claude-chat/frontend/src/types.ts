@@ -34,3 +34,22 @@ export type Subagent = {
   created_at: string;
   completed_at: string | null;
 };
+
+export type AuthStatus = {
+  logged_in: boolean;
+  email: string | null;
+  org_name: string | null;
+  auth_method: string | null;
+  subscription_type: string | null;
+  error?: string | null;
+};
+
+export type LoginSession = {
+  login_id: string;
+  status: string;
+  url: string | null;
+  error: string | null;
+  output?: string[];
+  logged_in?: boolean | null;
+  email?: string | null;
+};

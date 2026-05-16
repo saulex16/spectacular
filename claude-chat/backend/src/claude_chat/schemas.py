@@ -40,3 +40,26 @@ class SubagentRead(BaseModel):
     status: str
     created_at: datetime
     completed_at: datetime | None
+
+
+class AuthStatusRead(BaseModel):
+    logged_in: bool
+    email: str | None = None
+    org_name: str | None = None
+    auth_method: str | None = None
+    subscription_type: str | None = None
+    error: str | None = None
+
+
+class LoginSessionRead(BaseModel):
+    login_id: str
+    status: str
+    url: str | None = None
+    error: str | None = None
+    output: list[str] = []
+    logged_in: bool | None = None
+    email: str | None = None
+
+
+class LoginCodeSubmit(BaseModel):
+    code: str

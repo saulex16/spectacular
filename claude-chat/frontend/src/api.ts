@@ -1,4 +1,4 @@
-import type { Intercept, Message, Session, Subagent } from "./types";
+import type { AuthStatus, Intercept, LoginSession, Message, Session, Subagent } from "./types";
 
 const BASE = "/api";
 
@@ -60,4 +60,42 @@ export async function resolveIntercept(
 export function openSocket(id: string): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return new WebSocket(`${proto}://${location.host}/ws/sessions/${id}`);
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
+  const r = await fetch(`${BASE}/auth/status`);
+  if (!r.ok) throw new Error("failed to fetch auth status");
+  return r.json();
+}
+
+export async function startLogin(): Promise<LoginSession> {
+  const r = await fetch(`${BASE}/auth/login/start`, { method: "POST" });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? "failed to start login");
+  }
+  return r.json();
+}
+
+export async function pollLogin(loginId: string): Promise<LoginSession> {
+  const r = await fetch(`${BASE}/auth/login/${loginId}`);
+  if (!r.ok) throw new Error("login session not found");
+  return r.json();
+}
+
+export async function submitLoginCode(loginId: string, code: string): Promise<LoginSession> {
+  const r = await fetch(`${BASE}/auth/login/${loginId}/code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error((body as { detail?: string }).detail ?? "failed to submit code");
+  }
+  return r.json();
+}
+
+export async function cancelLogin(loginId: string): Promise<void> {
+  await fetch(`${BASE}/auth/login/${loginId}`, { method: "DELETE" });
 }

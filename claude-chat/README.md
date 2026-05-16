@@ -44,6 +44,6 @@ Open <http://localhost:5173>. The Vite dev server proxies `/api` and `/ws` to th
 ## Known limits (iteration 1)
 
 - `--permission-mode bypassPermissions` is on so tool calls don't block waiting for approval. Don't run this against untrusted prompts.
-- No auth, single user.
+- **Claude CLI login** via the web UI (`Sign in` button or `/login` in the composer): same OAuth flow as `claude auth login` / `/login` in Claude Code — copy the link, sign in in the browser, paste the session code.
 - No hook capture yet — see the followup iteration to wire `PreToolUse`/`PostToolUse`/`SubagentStop` into the server for fine-grained agent state.
 - No interrupt/cancel button. To stop a turn, kill the backend.
