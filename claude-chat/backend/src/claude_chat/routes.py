@@ -7,7 +7,7 @@ import uuid as uuid_mod
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import datetime, timezone
@@ -21,82 +21,22 @@ _intercept_events: dict[str, asyncio.Event] = {}  # intercept_id → resolved ev
 from claude_chat.db import SessionLocal, get_session
 from claude_chat.models import Message, Session, Subagent
 from claude_chat.process_manager import get_manager
+from claude_chat.providers.claude_cli import (
+    ClaudeCliProvider,
+    cli_event_to_canonical,
+    extract_task_invocations,
+    extract_tool_results,
+)
+from claude_chat.providers.claude_cli import (
+    _extract_assistant_text as cli_extract_assistant_text,
+)
+from claude_chat.providers.factory import get_provider_factory
+from claude_chat.providers.pydantic_ai_provider import ChatMessage, PydanticAiProvider
 from claude_chat.schemas import MessageRead, SessionCreate, SessionRead, SubagentRead
 
 router = APIRouter()
 
 DB = Annotated[AsyncSession, Depends(get_session)]
-
-
-def _extract_task_invocations(event: dict) -> list[dict]:
-    """Find `tool_use` blocks with name='Task' in an assistant event."""
-    if event.get("type") != "assistant":
-        return []
-    message = event.get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, list):
-        return []
-    out: list[dict] = []
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_use":
-            continue
-        if block.get("name") not in ("Task", "Agent"):
-            continue
-        inp = block.get("input") or {}
-        out.append(
-            {
-                "tool_use_id": block.get("id", ""),
-                "name": inp.get("description") or "subagent",
-                "prompt": inp.get("prompt") or "",
-                "subagent_type": inp.get("subagent_type") or "",
-            }
-        )
-    return out
-
-
-def _extract_tool_results(event: dict) -> list[dict]:
-    """Find `tool_result` blocks in a user event."""
-    if event.get("type") != "user":
-        return []
-    message = event.get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, list):
-        return []
-    out: list[dict] = []
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_result":
-            continue
-        raw = block.get("content")
-        if isinstance(raw, str):
-            text = raw
-        elif isinstance(raw, list):
-            text = "".join(
-                b.get("text", "")
-                for b in raw
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
-        else:
-            text = ""
-        out.append(
-            {
-                "tool_use_id": block.get("tool_use_id", ""),
-                "content": text,
-                "is_error": bool(block.get("is_error")),
-            }
-        )
-    return out
-
-
-def _extract_assistant_text(event: dict) -> str:
-    if event.get("type") != "assistant":
-        return ""
-    message = event.get("message") or {}
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if b.get("type") == "text")
-    return ""
 
 
 async def _has_user_messages(session_id: str) -> bool:
@@ -109,6 +49,27 @@ async def _has_user_messages(session_id: str) -> bool:
         return existing is not None
 
 
+async def _user_message_count(session_id: str) -> int:
+    async with SessionLocal() as db:
+        n = await db.scalar(
+            select(func.count())
+            .select_from(Message)
+            .where(Message.session_id == session_id, Message.role == "user")
+        )
+        return int(n or 0)
+
+
+async def _load_chat_history(session_id: str) -> list[ChatMessage]:
+    async with SessionLocal() as db:
+        result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.created_at)
+        )
+        rows = result.scalars().all()
+    return [ChatMessage(role=m.role, content=m.content) for m in rows]
+
+
 @router.get("/sessions", response_model=list[SessionRead])
 async def list_sessions(db: DB) -> list[Session]:
     result = await db.execute(select(Session).order_by(Session.updated_at.desc()))
@@ -117,10 +78,15 @@ async def list_sessions(db: DB) -> list[Session]:
 
 @router.post("/sessions", response_model=SessionRead)
 async def create_session(payload: SessionCreate, db: DB) -> Session:
+    provider = payload.provider or "claude_cli"
+    if provider not in ("claude_cli", "anthropic", "openai", "google"):
+        raise HTTPException(400, "invalid provider")
     session = Session(
         id=str(uuid.uuid4()),
         title=payload.title or "New session",
         cwd=payload.cwd or "",
+        provider=provider,
+        model=payload.model or "",
     )
     db.add(session)
     await db.commit()
@@ -141,7 +107,8 @@ async def delete_session(session_id: str, db: DB) -> None:
     session = await db.get(Session, session_id)
     if not session:
         raise HTTPException(404, "session not found")
-    await get_manager().kill(session_id)
+    if session.provider == "claude_cli":
+        await get_manager().kill(session_id)
     await db.delete(session)
     await db.commit()
 
@@ -318,19 +285,29 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
             await websocket.close()
             return
         cwd = session.cwd or None
+        model = session.model or None
 
-    manager = get_manager()
-    is_resume = await _has_user_messages(session_id)
+    factory = get_provider_factory()
     try:
-        proc = await manager.get_or_spawn(
-            session_id=session_id, cwd=cwd, is_resume=is_resume
-        )
-    except Exception as e:  # noqa: BLE001
-        await websocket.send_json({"type": "error", "message": f"failed to spawn claude: {e}"})
+        provider = factory.for_session(session)
+    except ValueError as e:
+        await websocket.send_json({"type": "error", "message": str(e)})
         await websocket.close()
         return
 
-    await websocket.send_json({"type": "ready", "state": proc.state})
+    if isinstance(provider, ClaudeCliProvider):
+        is_resume = await _has_user_messages(session_id)
+        try:
+            proc = await get_manager().get_or_spawn(
+                session_id=session_id, cwd=cwd, is_resume=is_resume
+            )
+        except Exception as e:  # noqa: BLE001
+            await websocket.send_json({"type": "error", "message": f"failed to spawn claude: {e}"})
+            await websocket.close()
+            return
+        await websocket.send_json({"type": "ready", "state": proc.state})
+    else:
+        await websocket.send_json({"type": "ready", "state": "api"})
 
     try:
         while True:
@@ -346,12 +323,6 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_json({"type": "error", "message": "empty prompt"})
                 continue
 
-            if proc.state == "dead":
-                is_resume = await _has_user_messages(session_id)
-                proc = await manager.get_or_spawn(
-                    session_id=session_id, cwd=cwd, is_resume=is_resume
-                )
-
             async with SessionLocal() as db:
                 db.add(Message(session_id=session_id, role="user", content=prompt))
                 await db.commit()
@@ -359,63 +330,100 @@ async def chat_ws(websocket: WebSocket, session_id: str) -> None:
 
             assistant_buf: list[str] = []
             ws_alive = True
-            # Maps tool_use_id → subagent db id for in-flight subagents.
-            # Events between a tool_use Agent/Task and its matching tool_result
-            # belong to the subagent context and get routed to the subagent tab.
-            active_sub: dict[str, int] = {}
 
-            async for event in proc.send_prompt(prompt):
-                # --- 1. Check if this event closes any active subagent ---
-                closed: set[int] = set()
-                for res in _extract_tool_results(event):
-                    tid = res["tool_use_id"]
-                    if tid in active_sub:
-                        sub_id = active_sub.pop(tid)
-                        closed.add(sub_id)
-                        payload = await _persist_subagent_complete(res)
-                        if payload and ws_alive:
-                            ws_alive = await _safe_send(
-                                websocket,
-                                {"type": "subagent_completed", "subagent": payload},
-                            )
-
-                # --- 2. Route to subagent tab if inside a subagent context ---
-                if active_sub:
-                    current_sub_id = next(reversed(active_sub.values()))
+            if isinstance(provider, PydanticAiProvider):
+                history = await _load_chat_history(session_id)
+                # Exclude the message we just added (last user) from history for this turn
+                if history and history[-1].role == "user" and history[-1].content == prompt:
+                    history = history[:-1]
+                async for event in provider.stream_turn(
+                    session_id=session_id,
+                    prompt=prompt,
+                    model=model,
+                    cwd=cwd,
+                    history=history,
+                ):
+                    etype = event.get("type")
+                    if etype == "text_delta":
+                        assistant_buf.append(event.get("text", ""))
                     if ws_alive:
-                        ws_alive = await _safe_send(
-                            websocket,
-                            {"type": "subagent_event", "subagent_id": current_sub_id, "event": event},
-                        )
-                    continue  # don't forward to parent, don't accumulate text
+                        ws_alive = await _safe_send(websocket, event)
+                    if etype == "error":
+                        break
+            else:
+                assert isinstance(provider, ClaudeCliProvider)
+                cli_resume = (await _user_message_count(session_id)) > 1
+                if proc.state == "dead":
+                    proc = await get_manager().get_or_spawn(
+                        session_id=session_id, cwd=cwd, is_resume=cli_resume
+                    )
+                active_sub: dict[str, int] = {}
+                async for raw_event in provider.stream_turn(
+                    session_id=session_id,
+                    prompt=prompt,
+                    model=None,
+                    cwd=cwd,
+                    history=[],
+                    is_resume=cli_resume,
+                ):
+                    closed: set[int] = set()
+                    for res in extract_tool_results(raw_event):
+                        tid = res["tool_use_id"]
+                        if tid in active_sub:
+                            sub_id = active_sub.pop(tid)
+                            closed.add(sub_id)
+                            sub_payload = await _persist_subagent_complete(res)
+                            if sub_payload and ws_alive:
+                                ws_alive = await _safe_send(
+                                    websocket,
+                                    {"type": "subagent_completed", "subagent": sub_payload},
+                                )
 
-                # Closing event belonged to the subagent; don't forward to parent.
-                if closed:
-                    continue
-
-                # --- 3. Parent context: forward event normally ---
-                if ws_alive:
-                    ws_alive = await _safe_send(websocket, event)
-                text = _extract_assistant_text(event)
-                if text:
-                    assistant_buf.append(text)
-
-                # --- 4. Detect new subagent launches in parent context ---
-                for inv in _extract_task_invocations(event):
-                    sub_payload = await _persist_subagent_start(session_id, inv)
-                    if sub_payload:
-                        active_sub[inv["tool_use_id"]] = sub_payload["id"]
+                    if active_sub:
+                        current_sub_id = next(reversed(active_sub.values()))
                         if ws_alive:
-                            ws_alive = await _safe_send(
-                                websocket,
-                                {"type": "subagent_started", "subagent": sub_payload},
-                            )
+                            for canon in cli_event_to_canonical(raw_event):
+                                ws_alive = await _safe_send(
+                                    websocket,
+                                    {
+                                        "type": "subagent_event",
+                                        "subagent_id": current_sub_id,
+                                        "event": canon,
+                                    },
+                                )
+                        continue
 
-            # Persist regardless of whether the client is still listening.
+                    if closed:
+                        continue
+
+                    for canon in cli_event_to_canonical(raw_event):
+                        if ws_alive:
+                            ws_alive = await _safe_send(websocket, canon)
+                        if canon.get("type") == "text_delta":
+                            assistant_buf.append(canon.get("text", ""))
+
+                    text = cli_extract_assistant_text(raw_event)
+                    if text and not any(
+                        c.get("type") == "text_delta" for c in cli_event_to_canonical(raw_event)
+                    ):
+                        assistant_buf.append(text)
+
+                    for inv in extract_task_invocations(raw_event):
+                        sub_payload = await _persist_subagent_start(session_id, inv)
+                        if sub_payload:
+                            active_sub[inv["tool_use_id"]] = sub_payload["id"]
+                            if ws_alive:
+                                ws_alive = await _safe_send(
+                                    websocket,
+                                    {"type": "subagent_started", "subagent": sub_payload},
+                                )
+
+                    if raw_event.get("type") == "process_died" and ws_alive:
+                        ws_alive = await _safe_send(websocket, raw_event)
+
             await _persist_turn(session_id, prompt, assistant_buf)
 
             if not ws_alive:
-                # Client left mid-turn; let the process live for next reconnect.
                 return
             await _safe_send(websocket, {"type": "turn_complete"})
 

@@ -16,6 +16,8 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     title: Mapped[str] = mapped_column(String(200), default="New session")
     cwd: Mapped[str] = mapped_column(String(500), default="")
+    provider: Mapped[str] = mapped_column(String(32), default="claude_cli")
+    model: Mapped[str] = mapped_column(String(120), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -38,6 +40,15 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     session: Mapped[Session] = relationship(back_populates="messages")
+
+
+class ProviderCredential(Base):
+    __tablename__ = "provider_credentials"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 class Subagent(Base):

@@ -1,4 +1,12 @@
-import type { Intercept, Message, Session, Subagent } from "./types";
+import type {
+  Intercept,
+  Message,
+  ModelOption,
+  ProviderId,
+  ProviderSettings,
+  Session,
+  Subagent,
+} from "./types";
 
 const BASE = "/api";
 
@@ -8,11 +16,21 @@ export async function listSessions(): Promise<Session[]> {
   return r.json();
 }
 
-export async function createSession(cwd?: string): Promise<Session> {
+export type CreateSessionOptions = {
+  cwd?: string;
+  provider?: ProviderId;
+  model?: string;
+};
+
+export async function createSession(opts: CreateSessionOptions = {}): Promise<Session> {
   const r = await fetch(`${BASE}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cwd: cwd ?? "" }),
+    body: JSON.stringify({
+      cwd: opts.cwd ?? "",
+      provider: opts.provider ?? "claude_cli",
+      model: opts.model ?? "",
+    }),
   });
   if (!r.ok) throw new Error("failed to create session");
   return r.json();
@@ -60,4 +78,31 @@ export async function resolveIntercept(
 export function openSocket(id: string): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return new WebSocket(`${proto}://${location.host}/ws/sessions/${id}`);
+}
+
+export async function getProviderSettings(): Promise<ProviderSettings> {
+  const r = await fetch(`${BASE}/settings/providers`);
+  if (!r.ok) throw new Error("failed to load provider settings");
+  return r.json();
+}
+
+export async function saveCredential(provider: ProviderId, apiKey: string): Promise<void> {
+  const r = await fetch(`${BASE}/settings/credentials/${provider}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!r.ok) throw new Error("failed to save credential");
+}
+
+export async function deleteCredential(provider: ProviderId): Promise<void> {
+  const r = await fetch(`${BASE}/settings/credentials/${provider}`, { method: "DELETE" });
+  if (!r.ok && r.status !== 204) throw new Error("failed to delete credential");
+}
+
+export async function listModels(provider: ProviderId): Promise<ModelOption[]> {
+  const r = await fetch(`${BASE}/settings/models?provider=${encodeURIComponent(provider)}`);
+  if (!r.ok) throw new Error("failed to list models");
+  const data = await r.json();
+  return data.models as ModelOption[];
 }

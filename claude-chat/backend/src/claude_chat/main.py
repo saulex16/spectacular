@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from claude_chat.db import init_db
 from claude_chat.process_manager import get_manager
 from claude_chat.routes import router
+from claude_chat.settings_routes import router as settings_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(settings_router)
 
 
 @app.get("/health")

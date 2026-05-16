@@ -1,7 +1,11 @@
+export type ProviderId = "claude_cli" | "anthropic" | "openai" | "google";
+
 export type Session = {
   id: string;
   title: string;
   cwd: string;
+  provider: ProviderId;
+  model: string;
   created_at: string;
   updated_at: string;
 };
@@ -33,4 +37,20 @@ export type Subagent = {
   status: "running" | "done" | "failed";
   created_at: string;
   completed_at: string | null;
+};
+
+export type ProviderInfo = {
+  id: ProviderId;
+  label: string;
+  configured: boolean;
+  hint: string | null;
+};
+
+export type ProviderSettings = {
+  providers: ProviderInfo[];
+};
+
+export type ModelOption = {
+  id: string;
+  label: string;
 };

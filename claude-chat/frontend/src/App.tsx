@@ -10,7 +10,9 @@ import {
   resolveIntercept,
 } from "./api";
 import { MarkdownMessage } from "./MarkdownMessage";
-import type { Intercept, Message, Session, Subagent } from "./types";
+import { ProviderModelPicker } from "./ProviderModelPicker";
+import { SettingsPanel } from "./SettingsPanel";
+import type { Intercept, Message, ProviderId, Session, Subagent } from "./types";
 
 type WsState = "closed" | "connecting" | "open";
 
@@ -47,10 +49,18 @@ function toolDetail(name: string, input: unknown): string {
   if (!input || typeof input !== "object") return "";
   const inp = input as Record<string, unknown>;
   switch (name) {
-    case "Read":      return String(inp.file_path ?? "");
-    case "Write":     return String(inp.file_path ?? "");
+    case "read_file":
+    case "Read":
+      return String(inp.path ?? inp.file_path ?? "");
+    case "write_file":
+    case "Write":
+      return String(inp.path ?? inp.file_path ?? "");
+    case "run_bash":
+    case "Bash":
+      return String(inp.command ?? "").split("\n")[0].slice(0, 120);
+    case "list_directory":
+      return String(inp.path ?? ".");
     case "Edit":      return String(inp.file_path ?? "");
-    case "Bash":      return String(inp.command ?? "").split("\n")[0].slice(0, 120);
     case "Glob":      return String(inp.pattern ?? "");
     case "Grep":      return `${inp.pattern ?? ""} ${inp.path ?? ""}`.trim();
     case "WebFetch":  return String(inp.url ?? "").slice(0, 100);
@@ -63,10 +73,55 @@ function toolDetail(name: string, input: unknown): string {
 }
 
 function isToolResult(ev: StreamEvent): boolean {
+  if (ev.type === "tool_result") return true;
   if (ev.type !== "user" || !ev.message) return false;
   const content = (ev.message as { content?: unknown }).content;
   if (!Array.isArray(content)) return false;
   return content.some((b: { type?: string }) => b.type === "tool_result");
+}
+
+function formatToolUse(name: string, input: unknown): string {
+  const detail = toolDetail(name, input);
+  return detail ? `🔧 ${name}  ${detail}` : `🔧 ${name}`;
+}
+
+function handleStreamPayload(
+  ev: StreamEvent,
+  appendText: (delta: string) => void,
+  pushEvents: (lines: string[]) => void,
+): boolean {
+  if (ev.type === "text_delta") {
+    const text = String(ev.text ?? "");
+    if (text) appendText(text);
+    return true;
+  }
+  if (ev.type === "tool_use") {
+    const name = String(ev.name ?? "tool");
+    if (name === "Task" || name === "Agent") return true;
+    pushEvents([formatToolUse(name, ev.input)]);
+    return true;
+  }
+  if (ev.type === "tool_result") return true;
+
+  const delta = extractStreamDelta(ev);
+  if (delta) {
+    appendText(delta);
+    return true;
+  }
+  if (ev.type === "assistant") {
+    const tools = extractToolUses(ev);
+    const lines: string[] = [];
+    for (const t of tools) {
+      if (t.name === "Task" || t.name === "Agent") {
+        lines.push(`🤖 subagent launched`);
+      } else {
+        lines.push(formatToolUse(t.name, t.input));
+      }
+    }
+    if (lines.length > 0) pushEvents(lines);
+    return true;
+  }
+  return false;
 }
 
 type ActiveTab = { kind: "parent" } | { kind: "subagent"; id: number };
@@ -88,6 +143,10 @@ export function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [wsState, setWsState] = useState<WsState>("closed");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showNewSession, setShowNewSession] = useState(false);
+  const [newProvider, setNewProvider] = useState<ProviderId>("claude_cli");
+  const [newModel, setNewModel] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   // Buffered streaming: deltas land in the ref, a rAF callback flushes them
@@ -120,9 +179,13 @@ export function App() {
     void refresh();
   }, []);
 
-  // Poll for pending intercepts while a turn is in progress.
+  const activeSession = sessions.find((s) => s.id === activeId) ?? null;
+  const isClaudeCli =
+    !activeSession || activeSession.provider === "claude_cli";
+
+  // Poll for pending intercepts while a turn is in progress (Claude CLI only).
   useEffect(() => {
-    if (!activeId || !busy) {
+    if (!activeId || !busy || !isClaudeCli) {
       setIntercept(null);
       return;
     }
@@ -142,7 +205,7 @@ export function App() {
     };
     void poll();
     return () => { alive = false; };
-  }, [activeId, busy]);
+  }, [activeId, busy, isClaudeCli]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
@@ -212,36 +275,36 @@ export function App() {
         const inner = (ev as { event?: StreamEvent }).event;
         if (subId == null || !inner) return;
 
-        const delta = extractStreamDelta(inner);
-        if (delta) {
-          if (!subagentBufRef.current[subId]) subagentBufRef.current[subId] = "";
-          subagentBufRef.current[subId] += delta;
-          requestAnimationFrame(() => {
-            const text = subagentBufRef.current[subId] ?? "";
-            setSubagentStreams((cur) => ({
-              ...cur,
-              [subId]: { text, events: cur[subId]?.events ?? [] },
-            }));
-          });
-          return;
-        }
-        if (inner.type === "assistant") {
-          const tools = extractToolUses(inner);
-          const entries = tools
-            .filter((t) => t.name !== "Task" && t.name !== "Agent")
-            .map((t) => {
-              const detail = toolDetail(t.name, t.input);
-              return detail ? `🔧 ${t.name}  ${detail}` : `🔧 ${t.name}`;
+        handleStreamPayload(
+          inner,
+          (delta) => {
+            if (!subagentBufRef.current[subId]) subagentBufRef.current[subId] = "";
+            subagentBufRef.current[subId] += delta;
+            requestAnimationFrame(() => {
+              const text = subagentBufRef.current[subId] ?? "";
+              setSubagentStreams((cur) => ({
+                ...cur,
+                [subId]: { text, events: cur[subId]?.events ?? [] },
+              }));
             });
-          if (entries.length > 0) {
+          },
+          (lines) => {
             setSubagentStreams((cur) => ({
               ...cur,
               [subId]: {
                 text: cur[subId]?.text ?? "",
-                events: [...(cur[subId]?.events ?? []), ...entries],
+                events: [...(cur[subId]?.events ?? []), ...lines],
               },
             }));
-          }
+          },
+        );
+        if (
+          inner.type === "text_delta" ||
+          inner.type === "tool_use" ||
+          extractStreamDelta(inner) ||
+          inner.type === "assistant"
+        ) {
+          return;
         }
         return;
       }
@@ -265,42 +328,21 @@ export function App() {
         return;
       }
 
-      // Tool results come paired with the assistant follow-up; hide them.
       if (isToolResult(ev)) return;
 
-      // Token-by-token streaming deltas — buffered via rAF.
-      const delta = extractStreamDelta(ev);
-      if (delta) {
-        appendStreaming(delta);
-        return;
-      }
-
-      // Full `assistant` event arrives at the end of each message — text is
-      // already accumulated via deltas, but tool_use entries appear here.
-      if (ev.type === "assistant") {
-        const tools = extractToolUses(ev);
-        const regular: string[] = [];
-        let subagentLaunches = 0;
-        for (const t of tools) {
-          if (t.name === "Task" || t.name === "Agent") {
-            subagentLaunches++;
-          } else {
-            regular.push(`🔧 ${t.name}`);
+      handleStreamPayload(
+        ev,
+        appendStreaming,
+        (lines) => {
+          const filtered =
+            isClaudeCli && subagents.length > 0
+              ? lines.filter((l) => l.includes("subagent"))
+              : lines;
+          if (filtered.length > 0) {
+            setEvents((es) => [...es, ...filtered]);
           }
-        }
-        const next: string[] = [];
-        if (subagentLaunches > 0) {
-          next.push(`🤖 subagent launched${subagentLaunches > 1 ? ` ×${subagentLaunches}` : ""}`);
-        }
-        // Only show regular tools when no subagent is running — otherwise the
-        // flood of Bash/Read calls from inside the subagent pollutes the parent.
-        if (subagents.length === 0 && regular.length > 0) {
-          next.push(...regular);
-        }
-        if (next.length > 0) {
-          setEvents((es) => [...es, ...next]);
-        }
-      }
+        },
+      );
     };
 
     ws.onclose = () => {
@@ -340,9 +382,13 @@ export function App() {
   }
 
   async function onNewSession() {
-    const s = await createSession();
+    const s = await createSession({
+      provider: newProvider,
+      model: newModel,
+    });
     await refresh();
     setActiveId(s.id);
+    setShowNewSession(false);
   }
 
   async function onDelete(id: string) {
@@ -401,8 +447,34 @@ export function App() {
       <aside className="sidebar">
         <header>
           <h1>Sessions</h1>
-          <button className="btn" onClick={onNewSession}>+ New</button>
+          <div className="sidebar-actions">
+            <button type="button" className="btn ghost" onClick={() => setSettingsOpen(true)}>
+              ⚙
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setShowNewSession((v) => !v)}
+            >
+              + New
+            </button>
+          </div>
         </header>
+        {showNewSession && (
+          <div className="new-session-panel">
+            <ProviderModelPicker
+              provider={newProvider}
+              model={newModel}
+              onChange={(p, m) => {
+                setNewProvider(p);
+                setNewModel(m);
+              }}
+            />
+            <button type="button" className="btn" onClick={() => void onNewSession()}>
+              Create session
+            </button>
+          </div>
+        )}
         <div className="session-list">
           {sessions.length === 0 && (
             <div style={{ padding: 16, color: "var(--muted)", fontSize: 13 }}>
@@ -417,6 +489,7 @@ export function App() {
             >
               <div className="title">
                 <div>{s.title}</div>
+                <div className="session-provider-tag">{s.provider ?? "claude_cli"}</div>
                 <div className="meta">{new Date(s.updated_at).toLocaleString()}</div>
               </div>
               <button
@@ -440,8 +513,13 @@ export function App() {
           <>
             <header>
               <span>session {activeId.slice(0, 8)}…</span>
+              <span className="provider-badge">
+                {activeSession?.provider ?? "claude_cli"}
+                {activeSession?.model ? ` / ${activeSession.model}` : ""}
+              </span>
               <span className={`ws-pill ws-${wsState}`}>{wsState}</span>
             </header>
+            {isClaudeCli && subagents.length > 0 && (
             <div className="tabs">
               <button
                 className={`tab ${onParentTab ? "active" : ""}`}
@@ -465,6 +543,7 @@ export function App() {
                 </button>
               ))}
             </div>
+            )}
             {onParentTab ? (
               <div className="messages" ref={scrollerRef}>
                 {messages.map((m) => (
@@ -481,7 +560,7 @@ export function App() {
                   </div>
                 )}
                 {busy && !streaming && events.length === 0 && (
-                  <div className="msg system">claude is thinking…</div>
+                  <div className="msg system">thinking…</div>
                 )}
               </div>
             ) : activeSubagent ? (
@@ -539,7 +618,7 @@ export function App() {
                     ? "connecting…"
                     : wsState === "closed"
                     ? "disconnected — reopen the session"
-                    : "Message claude…"
+                    : "Message…"
                 }
                 disabled={!onParentTab || wsState !== "open"}
                 onKeyDown={(e) => {
@@ -556,7 +635,8 @@ export function App() {
           </>
         )}
       </main>
-      {intercept && (
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {intercept && isClaudeCli && (
         <div className="intercept-overlay">
           <div className="intercept-modal">
             <div className="intercept-header">

@@ -17,9 +17,11 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     from claude_chat import models  # noqa: F401  (register models)
+    from claude_chat.migrate import run_migrations
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await run_migrations()
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

@@ -1,18 +1,37 @@
 # claude-chat
 
-Iteration 1: a chat UI for your local Claude Code install.
+Chat UI with multiple AI backends.
 
-- Lists sessions stored in SQLite.
-- Creates new sessions and spawns the local `claude` CLI per turn.
-- Streams `stream-json` events over WebSocket to the React UI.
+## Modes
 
-No Anthropic SDK or API calls — everything goes through the `claude` binary on your PATH.
+| Mode | Provider id | Requirements |
+|------|-------------|--------------|
+| **Claude CLI** (default) | `claude_cli` | `claude` on PATH, authenticated locally |
+| **Anthropic API** | `anthropic` | API key in Settings |
+| **OpenAI API** | `openai` | API key in Settings |
+| **Google Gemini API** | `google` | API key in Settings |
+
+API modes use [Pydantic AI](https://ai.pydantic.dev/) in-process with coding tools (`read_file`, `write_file`, `list_directory`, `run_bash`) scoped to the session `cwd`.
+
+**Subagent tabs** (Task/Agent) are only available in Claude CLI mode. API subagents are planned for a future release.
 
 ## Prerequisites
 
-- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
+- Python 3.10+ and [uv](https://docs.astral.sh/uv/)
 - Node 20+
-- `claude` CLI installed and authenticated (`claude --version` should work)
+- For Claude CLI mode: `claude --version` should work
+
+## Configuration
+
+Copy `backend/.env.example` to `backend/.env` and set:
+
+```bash
+CREDENTIALS_ENCRYPTION_KEY=<output of Fernet.generate_key()>
+```
+
+Without this key, the server uses an ephemeral key (credentials lost on restart).
+
+API keys are stored encrypted in SQLite via the Settings panel (⚙ in the sidebar). They are never returned in full to the client.
 
 ## Backend
 
@@ -22,8 +41,6 @@ uv sync
 uv run uvicorn claude_chat.main:app --reload --port 8000
 ```
 
-The DB file `backend/claude_chat.db` is created automatically on first run.
-
 ## Frontend
 
 ```bash
@@ -32,18 +49,21 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. The Vite dev server proxies `/api` and `/ws` to the backend.
+Open http://localhost:5173. Vite proxies `/api` and `/ws` to the backend.
 
-## How it works
+## Creating sessions
 
-- `POST /sessions` creates a row with a fresh UUID — this is the Claude Code session id.
-- The first message in a session spawns `claude -p --session-id <uuid> --output-format stream-json --verbose --permission-mode bypassPermissions "<prompt>"`.
-- Subsequent messages use `--resume <uuid>` so Claude Code's own session store keeps the conversation context.
-- Each stdout line from the CLI is parsed as a JSON event and forwarded to the WS client; assistant text is collected and persisted on `turn_complete`.
+Use **+ New** in the sidebar to pick a provider and model, then **Create session**. Existing sessions default to `claude_cli` after upgrade.
 
-## Known limits (iteration 1)
+## Tests
 
-- `--permission-mode bypassPermissions` is on so tool calls don't block waiting for approval. Don't run this against untrusted prompts.
-- No auth, single user.
-- No hook capture yet — see the followup iteration to wire `PreToolUse`/`PostToolUse`/`SubagentStop` into the server for fine-grained agent state.
-- No interrupt/cancel button. To stop a turn, kill the backend.
+```bash
+cd backend
+uv sync --extra dev
+uv run pytest
+```
+
+## Roadmap (v2)
+
+- Subagents for API providers via a custom `task` tool on Pydantic AI
+- Optional confirmation UI for `run_bash` in API mode
