@@ -253,9 +253,75 @@ body {
 .msg th, .msg td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
 .msg th { background: var(--panel-2); }
 
+/* Fenced code blocks */
+.code-block {
+  margin: 8px 0;
+  max-width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 10px;
+  background: #1a1f2e;
+  border-bottom: 1px solid var(--border);
+}
+.code-block-lang {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+.code-block-copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.code-block-copy:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.msg.user .code-block-copy {
+  color: rgba(26, 16, 35, 0.7);
+  border-color: rgba(26, 16, 35, 0.25);
+}
+.msg.user .code-block-copy:hover {
+  color: #1a1023;
+  border-color: rgba(26, 16, 35, 0.45);
+}
+.msg.user .code-block-header {
+  background: rgba(0, 0, 0, 0.12);
+  border-bottom-color: rgba(0, 0, 0, 0.15);
+}
+.msg.user .code-block-lang {
+  color: rgba(26, 16, 35, 0.65);
+}
+
+.inline-code-copyable {
+  cursor: pointer;
+}
+.inline-code-copyable:hover {
+  outline: 1px dashed var(--muted);
+  outline-offset: 2px;
+}
+.msg.user .inline-code-copyable:hover {
+  outline-color: rgba(26, 16, 35, 0.45);
+}
+
 /* Pre blocks (from react-syntax-highlighter) — override inline styles via specificity */
 .msg pre { margin: 8px 0; max-width: 100%; }
 .msg pre > div { max-width: 100%; }
+.msg .code-block pre { margin: 0; }
 
 .events {
   font-size: 11px;
